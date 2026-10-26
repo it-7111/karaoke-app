@@ -1,0 +1,15 @@
+{
+  "name": "カラオケ帳",
+  "short_name": "カラオケ帳",
+  "description": "歌える曲と点数をオフラインで記録し、スプレッドシートと同期する",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f5f8",
+  "theme_color": "#d9466f",
+  "lang": "ja",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
