@@ -1,5 +1,5 @@
 // アプリ本体をキャッシュしてオフラインでも起動できるようにする
-const VERSION = 'karaoke-v3';
+const VERSION = 'karaoke-v5';
 const ASSETS = [
   './', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',
@@ -21,8 +21,9 @@ self.addEventListener('fetch', e => {
   // 同期の通信（Apps Script）などはそのまま通す
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
   // オンラインなら最新を取りに行き、だめならキャッシュを使う
+  // cache: 'no-cache' でブラウザのHTTPキャッシュを素通りさせ、更新がすぐ届くようにする
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request.url, { cache: 'no-cache', credentials: 'same-origin' })
       .then(res => {
         if (res.ok) { const copy = res.clone(); caches.open(VERSION).then(c => c.put(e.request, copy)); }
         return res;

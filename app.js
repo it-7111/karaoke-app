@@ -68,10 +68,13 @@ const firstKana = song => { const c = hiraChars(song)[0]; return c ? (SMALL_KANA
 const lastKana = song => { const c = hiraChars(song).pop(); return c ? (SMALL_KANA[c] || c) : null; };
 
 const isAudio = f => String(f.mime || '').startsWith('audio/');
+const isText = f => String(f.mime || '').startsWith('text/');
+const textTitle = f => String(f.name || '').replace(/\.(txt|md)$/i, '');
+const fmtSize = n => (n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))}KB` : `${(n / 1024 / 1024).toFixed(1)}MB`);
 function guessMime(file) {
   if (file.type) return file.type;
   const ext = (file.name.match(/\.(\w+)$/) || [])[1]?.toLowerCase();
-  return { pdf: 'application/pdf', m4a: 'audio/mp4', mp4: 'audio/mp4', aac: 'audio/aac', mp3: 'audio/mpeg', wav: 'audio/wav', webm: 'audio/webm', caf: 'audio/x-caf' }[ext] || '';
+  return { pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', m4a: 'audio/mp4', mp4: 'audio/mp4', aac: 'audio/aac', mp3: 'audio/mpeg', wav: 'audio/wav', webm: 'audio/webm', caf: 'audio/x-caf' }[ext] || '';
 }
 
 // ============================================================
@@ -124,7 +127,7 @@ const S = {
   pick: { mode: 'random', okOnly: true, fit: false, unsung: false, result: null, q: '' },
   pendingSetlistItem: null,
   filter: { q: '', status: 'all', range: false, fit: false, pdf: false, sung: 'all', sort: 'kana' },
-  stats: { machine: 'all' },
+  stats: { machine: 'all', rankBy: 'avg', rankMin3: true },
   logLimit: 150,
   outbox: 0, syncing: false, inflight: new Set(),
   version: 0,
@@ -244,7 +247,7 @@ async function deleteScore(score) {
 async function addFiles(song, files) {
   for (const f of files) {
     const mime = guessMime(f);
-    if (mime !== 'application/pdf' && !mime.startsWith('audio/')) { toast(`${f.name} はPDFでも音声でもありません`); continue; }
+    if (mime !== 'application/pdf' && !mime.startsWith('audio/') && !mime.startsWith('text/')) { toast(`${f.name} はPDF・テキスト・音声のどれでもありません`); continue; }
     const meta = { id: uid(), songId: song.id, songTitle: song.title, name: f.name, size: f.size, mime, updatedAt: Date.now(), driveId: '', hasBlob: true };
     await idb.put('pdfBlobs', f.slice(0, f.size, mime), meta.id);
     await idb.put('pdfs', meta);
@@ -252,6 +255,45 @@ async function addFiles(song, files) {
     await queue({ kind: 'pdf', op: 'upload', id: meta.id });
   }
   changed();
+}
+
+// テキストのディレクションも添付ファイルと同じ仕組みで保存・同期する（ドライブには .txt として置かれる）
+async function saveTextNote(song, meta, title, body) {
+  const name = `${title.trim() || 'ディレクション'}.txt`;
+  const blob = new Blob([body], { type: 'text/plain' });
+  if (!meta) {
+    await addFiles(song, [new File([blob], name, { type: 'text/plain' })]);
+    return;
+  }
+  Object.assign(meta, { name, size: blob.size, mime: 'text/plain', updatedAt: Date.now(), hasBlob: true });
+  await idb.put('pdfBlobs', blob, meta.id);
+  await idb.put('pdfs', meta);
+  const pending = (await idb.all('outbox')).some(o => o.kind === 'pdf' && o.op === 'upload' && o.id === meta.id && !S.inflight.has(o.seq));
+  if (pending) scheduleSync(); else await queue({ kind: 'pdf', op: 'upload', id: meta.id });
+  changed();
+}
+
+async function textForm(song, meta) {
+  const body = meta ? await (await idb.get('pdfBlobs', meta.id))?.text() ?? null : '';
+  if (meta && body == null) { toast('まだダウンロードされていません。オンラインで一度開いてください'); return; }
+  openModal(`
+    <div class="sheet-head"><button data-action="close-modal">キャンセル</button><h2>${meta ? 'テキストを編集' : 'テキストを追加'}</h2><button data-action="save-text">保存</button></div>
+    <form class="form" id="textForm" data-song="${song.id}" data-id="${meta?.id || ''}">
+      <label class="full">タイトル<input name="title" value="${esc(meta ? textTitle(meta) : 'ディレクション')}" autocomplete="off"></label>
+      <label class="full">本文<textarea name="body" class="big" placeholder="歌詞の解釈、歌い方の指示、ブレス位置など">${esc(body)}</textarea></label>
+    </form>`);
+}
+
+async function submitTextForm() {
+  const form = $('#textForm');
+  const song = S.songs.find(x => x.id === form.dataset.song);
+  const meta = S.pdfs.find(x => x.id === form.dataset.id);
+  const title = form.title.value, body = form.body.value;
+  if (!song) { closeModal(); return; }
+  await saveTextNote(song, meta, title, body);
+  closeModal();
+  if (meta && viewerState?.p?.id === meta.id) openPdf(meta); else render({ keepScroll: true });
+  toast('保存しました');
 }
 
 async function saveSetlist(sl) {
@@ -537,7 +579,7 @@ function songToolbarHtml() {
     <input class="search" id="q" type="search" placeholder="曲名・歌手・かなで検索" value="${esc(f.q)}" autocomplete="off">
     <div class="chips">
       ${chip('status', 'all', 'すべて')}${chip('status', 'OK', '状況OK')}${chip('status', '未履修', '未履修')}
-      ${toggle('range', '原キーで音域内')}${toggle('fit', 'キー変更で歌える')}${toggle('pdf', 'PDFあり')}
+      ${toggle('range', '原キーで音域内')}${toggle('fit', 'キー変更で歌える')}${toggle('pdf', '資料あり')}
       ${chip('sung', 'yes', '歌った')}${chip('sung', 'no', '未歌唱')}
       <select class="chip" id="sort" aria-label="並び替え">
         ${[['kana', 'かな順'], ['avg', '平均点順'], ['max', '最高点順'], ['n', '回数順'], ['recent', '最近歌った順'], ['no', '番号順']]
@@ -551,7 +593,7 @@ function filteredSongs() {
   const f = S.filter;
   const st = songStats();
   const q = normalize(f.q);
-  const pdfSongs = new Set(S.pdfs.filter(p => !isAudio(p)).map(p => p.songId));
+  const pdfSongs = new Set(S.pdfs.filter(p => !isAudio(p)).map(p => p.songId)); // PDF かテキストのディレクションがある曲
   let list = S.songs.filter(s => {
     if (q && ![s.title, s.kana, s.artist, s.artistKana].some(x => normalize(x).includes(q))) return false;
     if (f.status === 'OK' && s.status !== 'OK') return false;
@@ -596,7 +638,7 @@ function renderSongList() {
     return `<button class="row" data-action="open-song" data-id="${s.id}">
       <div class="main">
         <div class="t">${esc(s.title)}</div>
-        <div class="s">${s.status === 'OK' ? '<span class="badge ok">OK</span>' : s.status ? `<span class="badge todo">${esc(s.status)}</span>` : ''}${pc ? `<span class="badge pdf">PDF ${pc}</span>` : ''}${rc ? `<span class="badge pdf">♪${rc}</span>` : ''}${fit?.ok && !fit.orig ? `<span class="badge m">${esc(fit.label.replace('で歌える', ''))}</span>` : ''}${esc(s.artist || '')}${s.high ? ` ・最高 ${esc(s.high.replace(/\(.*\)/, ''))}` : ''}</div>
+        <div class="s">${s.status === 'OK' ? '<span class="badge ok">OK</span>' : s.status ? `<span class="badge todo">${esc(s.status)}</span>` : ''}${pc ? `<span class="badge pdf">資料 ${pc}</span>` : ''}${rc ? `<span class="badge pdf">♪${rc}</span>` : ''}${fit?.ok && !fit.orig ? `<span class="badge m">${esc(fit.label.replace('で歌える', ''))}</span>` : ''}${esc(s.artist || '')}${s.high ? ` ・最高 ${esc(s.high.replace(/\(.*\)/, ''))}` : ''}</div>
       </div>
       <div class="num">${x ? `<b>${fmt3(x.avg)}</b><small>${x.n}回・最高${fmt3(x.max)}</small>` : '<small>未歌唱</small>'}</div>
     </button>`;
@@ -607,13 +649,13 @@ function renderSongList() {
 function songDetailHtml(song) {
   const scores = S.scores.filter(s => s.title === song.title && s.point != null);
   const x = songStats().get(song.title);
-  const pdfs = S.pdfs.filter(p => p.songId === song.id && !isAudio(p));
+  const pdfs = S.pdfs.filter(p => p.songId === song.id && !isAudio(p)).sort((a, b) => a.updatedAt - b.updatedAt);
   const recs = S.pdfs.filter(p => p.songId === song.id && isAudio(p));
   const fit = keyFit(song);
   const attachRow = p => `<div class="row">
         <button class="main" style="border:0;background:none;text-align:left;padding:0" data-action="open-pdf" data-id="${p.id}">
-          <div class="t">${isAudio(p) ? '🎙' : '📄'} ${esc(p.name)}</div>
-          <div class="s">${(p.size / 1024 / 1024).toFixed(1)}MB・${p.hasBlob ? 'オフラインで再生・閲覧可' : 'クラウドのみ（開くとダウンロード）'}${p.driveId ? '' : '・未アップロード'}</div>
+          <div class="t">${isAudio(p) ? '🎙' : isText(p) ? '📝' : '📄'} ${esc(isText(p) ? textTitle(p) : p.name)}</div>
+          <div class="s">${isText(p) ? 'テキスト' : fmtSize(p.size)}・${p.hasBlob ? (isAudio(p) ? 'オフラインで再生可' : 'オフラインで閲覧可') : 'クラウドのみ（開くとダウンロード）'}${p.driveId ? '' : '・未アップロード'}</div>
         </button>
         <button class="btn danger" data-action="del-pdf" data-id="${p.id}">削除</button>
       </div>`;
@@ -643,9 +685,9 @@ function songDetailHtml(song) {
       <div class="help" style="margin-top:6px">${Object.entries(byMachine).map(([m, a]) => `${esc(m)}: 平均 ${fmt3(a.reduce((p, c) => p + c, 0) / a.length)}（${a.length}回）`).join('　')}</div>
     </div>` : '<div class="card empty">まだ点数の記録がありません</div>'}
 
-    <div class="section-h">PDF（歌詞解釈・ディレクションなど）<button data-action="add-pdf" data-id="${song.id}">＋追加</button></div>
-    <input type="file" id="pdfInput" accept="application/pdf,.pdf" multiple hidden data-id="${song.id}">
-    <div class="list">${pdfs.map(attachRow).join('') || '<div class="empty" style="padding:18px">PDFはまだありません</div>'}</div>
+    <div class="section-h">ディレクション・歌詞解釈<span><button data-action="add-pdf" data-id="${song.id}">＋ファイル</button><button data-action="new-text" data-id="${song.id}">＋テキスト</button></span></div>
+    <input type="file" id="pdfInput" accept="application/pdf,.pdf,text/plain,.txt,.md" multiple hidden data-id="${song.id}">
+    <div class="list">${pdfs.map(attachRow).join('') || '<div class="empty" style="padding:18px">PDFやテキストはまだありません</div>'}</div>
 
     <div class="section-h">練習録音<span><button data-action="add-audio">ファイル</button><button id="recBtn" data-action="record" data-id="${song.id}">${rec && rec.songId === song.id ? '■ 停止' : '● 録音'}</button></span></div>
     <input type="file" id="audioInput" accept="audio/*" multiple hidden data-id="${song.id}">
@@ -891,14 +933,13 @@ function statsHtml() {
   const avg = pts.reduce((a, b) => a + b, 0) / pts.length;
   const per = new Map();
   scores.forEach(s => { const a = per.get(s.title) || []; a.push(s.point); per.set(s.title, a); });
-  const songsArr = [...per].map(([t, a]) => ({ t, n: a.length, avg: a.reduce((x, y) => x + y, 0) / a.length, max: Math.max(...a) }));
+  const songsArr = [...per].map(([t, a]) => ({ t, n: a.length, avg: a.reduce((x, y) => x + y, 0) / a.length, max: Math.max(...a), min: Math.min(...a) }));
   const thisYear = String(new Date().getFullYear());
   const ytd = scores.filter(s => (s.date || '').startsWith(thisYear)).length;
 
   // 点数分布（80点未満はまとめる）
-  const bins = [];
-  for (let b = 100; b >= 80; b--) bins.push({ label: String(b), n: pts.filter(p => Math.floor(p) === b).length });
-  bins.push({ label: '<80', n: pts.filter(p => p < 80).length });
+  const bins = [{ label: '<80', n: pts.filter(p => p < 80).length }];
+  for (let b = 80; b <= 100; b++) bins.push({ label: String(b), n: pts.filter(p => Math.floor(p) === b).length });
   const maxBin = Math.max(...bins.map(b => b.n), 1);
   const W = 600, H = 160, bw = (W - 20) / bins.length;
   const hist = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="点数分布">
@@ -915,7 +956,7 @@ function statsHtml() {
     ${mc.map((n, i) => { const h = (n / mMax) * (H - 36); return `<rect class="bar dim" x="${10 + i * mbw + 3}" y="${H - 18 - h}" width="${mbw - 6}" height="${h}" rx="2"/>${n ? `<text class="lbl" x="${10 + i * mbw + mbw / 2}" y="${H - 22 - h}" text-anchor="middle">${n}</text>` : ''}<text class="lbl" x="${10 + i * mbw + mbw / 2}" y="${H - 4}" text-anchor="middle">${+months[i].slice(5)}月</text>`; }).join('')}
   </svg>`;
 
-  const rank = (arr, key, fmt) => `<div class="list">${arr.map((s, i) => `<button class="row" data-action="open-song-title" data-title="${esc(s.t)}"><div class="main"><div class="t">${i + 1}. ${esc(s.t)}</div><div class="s">${s.n}回・平均${fmt3(s.avg)}</div></div><div class="num"><b>${fmt(s[key])}</b></div></button>`).join('')}</div>`;
+  const rank = (arr, key, fmt) => `<div class="list">${arr.map((s, i) => `<button class="row" data-action="open-song-title" data-title="${esc(s.t)}"><div class="main"><div class="t">${i + 1}. ${esc(s.t)}</div><div class="s">${[`${s.n}回`, ...[['avg', '平均'], ['max', '最高'], ['min', '最低']].filter(([k]) => k !== key).map(([k, l]) => `${l}${fmt3(s[k])}`)].join('・')}</div></div><div class="num"><b>${fmt(s[key])}</b></div></button>`).join('')}</div>`;
 
   return chips + `<div class="stat-tiles">
     <div class="tile"><div class="l">記録数</div><div class="v">${pts.length}</div></div>
@@ -926,8 +967,12 @@ function statsHtml() {
   </div>
   <div class="section-h">点数分布</div><div class="card">${hist}</div>
   <div class="section-h">月別の歌唱回数（直近12か月）</div><div class="card">${monthly}</div>
-  <div class="section-h">平均点ランキング（3回以上）</div>
-  ${rank(songsArr.filter(s => s.n >= 3).sort((a, b) => b.avg - a.avg).slice(0, 15), 'avg', fmt3)}
+  <div class="section-h">ランキング</div>
+  <div class="chips" style="margin-bottom:8px">
+    ${[['avg', '平均点'], ['max', '最高点'], ['min', '最低点']].map(([k, l]) => `<button class="chip ${S.stats.rankBy === k ? 'on' : ''}" data-action="rank-by" data-v="${k}">${l}</button>`).join('')}
+    <button class="chip ${S.stats.rankMin3 ? 'on' : ''}" data-action="rank-min3">3回以上の曲だけ</button>
+  </div>
+  ${rank(songsArr.filter(s => !S.stats.rankMin3 || s.n >= 3).sort((a, b) => b[S.stats.rankBy] - a[S.stats.rankBy] || b.avg - a.avg).slice(0, 20), S.stats.rankBy, fmt3)}
   <div class="section-h">よく歌う曲</div>
   ${rank(songsArr.sort((a, b) => b.n - a.n).slice(0, 15), 'n', v => `${v}回`)}`;
 }
@@ -1145,6 +1190,7 @@ async function openPdf(p) {
   const pages = $('#viewerPages');
   $('#viewerTitle').textContent = p.name;
   document.querySelectorAll('#viewer [data-action="zoom"]').forEach(b => { b.hidden = isAudio(p); });
+  $('#viewerEdit').hidden = !isText(p);
   pages.innerHTML = '<div class="msg">読み込み中…</div>';
   viewer.hidden = false;
   try {
@@ -1153,6 +1199,11 @@ async function openPdf(p) {
       if (!navigator.onLine || !p.driveId) throw new Error(navigator.onLine ? 'まだアップロードされていないPDFです' : 'オフラインのため開けません。オンラインのときに一度開くか同期すると、以後はオフラインで見られます');
       pages.innerHTML = '<div class="msg">ダウンロード中…</div>';
       blob = await fetchPdfBlob(p);
+    }
+    if (isText(p)) {
+      viewerState = { p, blob, text: true, zoom: viewerState?.text ? viewerState.zoom : 1 };
+      pages.innerHTML = `<div class="text-view" style="font-size:${16 * viewerState.zoom}px">${esc(await blob.text()) || '<span style="color:#999">（空です）</span>'}</div>`;
+      return;
     }
     if (isAudio(p)) {
       viewerState = { p, blob, audio: true, url: URL.createObjectURL(blob) };
@@ -1299,7 +1350,17 @@ document.addEventListener('click', async e => {
     case 'close-modal': closeModal(); break;
     case 'more-log': S.logLimit += 300; render({ keepScroll: true }); break;
     case 'stats-machine': S.stats.machine = el.dataset.v; render({ keepScroll: true }); break;
+    case 'rank-by': S.stats.rankBy = el.dataset.v; render({ keepScroll: true }); break;
+    case 'rank-min3': S.stats.rankMin3 = !S.stats.rankMin3; render({ keepScroll: true }); break;
     case 'add-pdf': $('#pdfInput').click(); break;
+    case 'new-text': textForm(S.songs.find(s => s.id === id), null); break;
+    case 'edit-text': {
+      const meta = viewerState?.p;
+      const song = meta && S.songs.find(s => s.id === meta.songId);
+      if (song) textForm(song, meta); else toast('曲が見つかりません');
+      break;
+    }
+    case 'save-text': submitTextForm(); break;
     case 'add-audio': $('#audioInput').click(); break;
     case 'record': toggleRecording(S.songs.find(s => s.id === id)); break;
     case 'new-setlist': {
@@ -1344,7 +1405,10 @@ document.addEventListener('click', async e => {
       break;
     }
     case 'close-viewer': closeViewer(); break;
-    case 'zoom': if (viewerState) { viewerState.zoom = Math.min(3, Math.max(0.5, viewerState.zoom + Number(el.dataset.z) * 0.25)); renderPdfPages(); } break;
+    case 'zoom': if (viewerState?.text) {
+      viewerState.zoom = Math.min(2.5, Math.max(0.75, viewerState.zoom + Number(el.dataset.z) * 0.125));
+      $('#viewerPages .text-view').style.fontSize = `${16 * viewerState.zoom}px`;
+    } else if (viewerState) { viewerState.zoom = Math.min(3, Math.max(0.5, viewerState.zoom + Number(el.dataset.z) * 0.25)); renderPdfPages(); } break;
     case 'share-pdf': {
       if (!viewerState) break;
       const f = new File([viewerState.blob], viewerState.p.name, { type: viewerState.p.mime || 'application/pdf' });
@@ -1390,6 +1454,7 @@ document.addEventListener('submit', async e => {
   }
   if (e.target.id === 'scoreForm') submitScoreForm();
   if (e.target.id === 'songForm') submitSongForm();
+  if (e.target.id === 'textForm') submitTextForm();
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') { if (!$('#viewer').hidden) closeViewer(); else if (!modal.hidden) closeModal(); }
