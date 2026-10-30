@@ -25,7 +25,7 @@ const SONG_COLS = {
 };
 // 配列は「新しい見出し, 作り替え前の見出し」の順で探す
 const SCORE_COLS = {
-  date: 'Date', title: 'name', point: ['総合得点', 'point'], machine: '機種とキー',
+  date: 'Date', title: 'name', point: ['総合得点', 'point'], machine: ['機種', '機種とキー'],
   on: ['音程', '音'], vlt: 'ビブラート&ロングトーン', rhythm: 'リズム', hyo: ['表現力', '表'],
   stab: '安定性', choukan: '聴感', yoku: ['抑揚', '抑'], ai: 'Ai/聴', bonus: ['ボーナス点', '加点'],
   comment: 'コメント', key: 'キー', id: '_id',
