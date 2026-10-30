@@ -1,5 +1,5 @@
 // アプリ本体をキャッシュしてオフラインでも起動できるようにする
-const VERSION = 'karaoke-v5';
+const VERSION = 'karaoke-v7';
 const ASSETS = [
   './', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',

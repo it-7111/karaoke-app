@@ -16,7 +16,12 @@ const normalize = s => String(s ?? '').normalize('NFKC').toLowerCase()
   .replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60)).replace(/\s+/g, '');
 
 const SONG_FIELDS = ['title', 'kana', 'artist', 'artistKana', 'status', 'progress', 'caution', 'low', 'high', 'recKey', 'ref', 'request', 'memo'];
-const SCORE_FIELDS = ['date', 'title', 'point', 'machine', 'on', 'hyo', 'yoku', 'ai', 'bonus', 'comment', 'key'];
+const SCORE_FIELDS = ['date', 'title', 'point', 'machine', 'on', 'vlt', 'rhythm', 'hyo', 'stab', 'choukan', 'yoku', 'ai', 'bonus', 'comment', 'key'];
+// チャートの評価項目（聴感は Ai-Heart＝WAO のみ）。チャート合計はこれらの合計
+const CHART = [['on', '音程', '音'], ['vlt', 'ビブラート&ロングトーン', 'ビ'], ['rhythm', 'リズム', 'リ'], ['hyo', '表現力', '表'], ['stab', '安定性', '安'], ['choukan', '聴感', '聴']];
+const chartTotal = s => { const v = CHART.map(([k]) => s[k]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) : null; };
+const rawScore = s => (s.point != null && s.bonus != null ? Math.round((s.point - s.bonus) * 1000) / 1000 : null);
+const isHeart = m => machineGroup(m) === 'WAO';
 const MACHINES = ['Dx', 'Ai', 'WAO', 'JoyAI'];
 const machineGroup = m => {
   const s = normalize(m);
@@ -682,6 +687,7 @@ function songDetailHtml(song) {
       <div class="tile"><div class="l">最低</div><div class="v">${fmt3(x.min)}</div></div>
     </div>
     <div class="card" style="margin-top:8px">${trendChart(scores)}
+      ${chartAvgHtml(scores)}
       <div class="help" style="margin-top:6px">${Object.entries(byMachine).map(([m, a]) => `${esc(m)}: 平均 ${fmt3(a.reduce((p, c) => p + c, 0) / a.length)}（${a.length}回）`).join('　')}</div>
     </div>` : '<div class="card empty">まだ点数の記録がありません</div>'}
 
@@ -708,12 +714,28 @@ function songDetailHtml(song) {
   </div>`;
 }
 
+function chartAvgHtml(scores) {
+  const avg = k => { const v = scores.map(s => s[k]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+  const parts = CHART.map(([k, l]) => [l, avg(k)]).filter(([, a]) => a != null);
+  const totals = scores.map(chartTotal).filter(x => x != null);
+  if (!parts.length) return '';
+  const r1 = x => Math.round(x * 10) / 10;
+  return `<div class="help" style="margin-top:6px">チャート平均：${parts.map(([l, a]) => `${l} ${r1(a)}`).join('・')}${totals.length ? `・合計 ${r1(totals.reduce((a, b) => a + b, 0) / totals.length)}` : ''}</div>`;
+}
+
 function scoreRowHtml(s, { showTitle = false } = {}) {
-  const sub = [['音', s.on], ['表', s.hyo], ['抑', s.yoku], ['Ai', s.ai]].filter(([, v]) => v != null).map(([k, v]) => `${k}${v}`).join(' ');
+  const total = chartTotal(s), raw = rawScore(s);
+  const sub = [
+    CHART.filter(([k]) => s[k] != null).map(([k, , a]) => `${a}${s[k]}`).join(' '),
+    total != null ? `計${total}` : '',
+    s.yoku != null ? `抑揚${s.yoku}` : '',
+    s.ai != null ? `旧Ai/聴${s.ai}` : '',
+    raw != null ? `素点${fmt3(raw)}` : '',
+  ].filter(Boolean).join(' ');
   return `<button class="row" data-action="edit-score" data-id="${s.id}">
     <div class="main">
       <div class="t">${showTitle ? esc(s.title) : fmtDate(s.date)}</div>
-      <div class="s"><span class="badge m">${esc(s.machine || '機種なし')}</span>${esc([s.key, sub, s.bonus != null ? `加点${s.bonus}` : '', s.comment].filter(Boolean).join('・'))}</div>
+      <div class="s"><span class="badge m">${esc(s.machine || '機種なし')}</span>${esc([s.key, sub, s.bonus != null ? `ボーナス${s.bonus}` : '', s.comment].filter(Boolean).join('・'))}</div>
     </div>
     <div class="num"><b>${fmt3(s.point)}</b></div>
   </button>`;
@@ -1074,19 +1096,35 @@ function scoreForm(score, presetTitle) {
       <label class="full">曲名<input name="title" list="titleList" value="${v(s.title)}" required autocomplete="off"><datalist id="titleList">${titles.map(t => `<option value="${esc(t)}">`).join('')}</datalist></label>
       <label>日付<input name="date" type="date" value="${v(s.date)}"></label>
       <label>機種<select name="machine">${machineOpts.map(m => `<option ${m === s.machine ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></label>
-      <label>点数<input name="point" inputmode="decimal" value="${v(s.point)}" placeholder="92.345"></label>
+      <label>総合得点<input name="point" inputmode="decimal" value="${v(s.point)}" placeholder="92.345"></label>
+      <label>ボーナス点<input name="bonus" inputmode="decimal" value="${v(s.bonus)}" placeholder="1.234"></label>
+      <label>素点（自動）<output id="rawOut" class="calc">–</output></label>
       <label>キー<input name="key" list="keyList" value="${v(s.key)}" autocomplete="off"><datalist id="keyList">${keys.map(k => `<option value="${k}">`).join('')}</datalist></label>
-      <div class="sub">
-        <label>音<input name="on" inputmode="decimal" value="${v(s.on)}"></label>
-        <label>表<input name="hyo" inputmode="decimal" value="${v(s.hyo)}"></label>
-        <label>抑<input name="yoku" inputmode="decimal" value="${v(s.yoku)}"></label>
-        <label>Ai/聴<input name="ai" inputmode="decimal" value="${v(s.ai)}"></label>
-        <label>加点<input name="bonus" inputmode="decimal" value="${v(s.bonus)}"></label>
+      <div class="full chart-head">チャート</div>
+      <div class="chart-grid">
+        ${CHART.map(([k, l]) => `<label class="${k === 'choukan' ? 'heart-only' : ''}" ${k === 'choukan' && !isHeart(s.machine) ? 'hidden' : ''}>${l}${k === 'choukan' ? '<small>（Ai-Heart）</small>' : ''}<input name="${k}" inputmode="decimal" value="${v(s[k])}"></label>`).join('')}
+        <label>チャート合計（自動）<output id="totalOut" class="calc">–</output></label>
+        <label>抑揚<input name="yoku" inputmode="decimal" value="${v(s.yoku)}"></label>
       </div>
+      ${s.ai != null ? `<div class="full help">旧項目「Ai/聴」: ${esc(s.ai)}（スプレッドシートにそのまま残っています）</div>` : ''}
       <label class="full">コメント<input name="comment" value="${v(s.comment)}" autocomplete="off"></label>
       ${isNew ? '' : '<div class="full" style="grid-column:1/-1"><button class="btn danger" type="button" data-action="delete-score">この記録を削除</button></div>'}
     </form>`);
+  updateScoreCalc();
   if (isNew && !presetTitle) setTimeout(() => $('#scoreForm [name=title]').focus(), 50);
+}
+
+// 入力に合わせてチャート合計・素点を計算し、聴感の欄を機種で出し分ける
+function updateScoreCalc() {
+  const f = $('#scoreForm');
+  if (!f) return;
+  const heart = isHeart(f.machine.value);
+  f.querySelector('.heart-only').hidden = !heart;
+  const rec = { point: numOrNull(f.point.value), bonus: numOrNull(f.bonus.value) };
+  CHART.forEach(([k]) => { rec[k] = k === 'choukan' && !heart ? null : numOrNull(f[k].value); });
+  const total = chartTotal(rec), raw = rawScore(rec);
+  $('#totalOut').textContent = total == null ? '–' : String(Math.round(total * 1000) / 1000);
+  $('#rawOut').textContent = raw == null ? '–' : fmt3(raw);
 }
 
 async function submitScoreForm() {
@@ -1106,7 +1144,9 @@ async function submitScoreForm() {
     point,
     machine: String(fd.get('machine') || ''),
     key: String(fd.get('key') || '').trim(),
-    on: numOrNull(fd.get('on')), hyo: numOrNull(fd.get('hyo')), yoku: numOrNull(fd.get('yoku')), ai: numOrNull(fd.get('ai')), bonus: numOrNull(fd.get('bonus')),
+    on: numOrNull(fd.get('on')), vlt: numOrNull(fd.get('vlt')), rhythm: numOrNull(fd.get('rhythm')), hyo: numOrNull(fd.get('hyo')), stab: numOrNull(fd.get('stab')),
+    choukan: isHeart(fd.get('machine')) ? numOrNull(fd.get('choukan')) : null,
+    yoku: numOrNull(fd.get('yoku')), ai: old?.ai ?? null, bonus: numOrNull(fd.get('bonus')),
     comment: String(fd.get('comment') || '').trim(),
   };
   if (!S.songs.some(s => s.title === title)) {
@@ -1425,11 +1465,13 @@ $('#backBtn').addEventListener('click', () => { if (S.tab === 'setlist') S.setli
 
 document.addEventListener('input', e => {
   if (e.target.id === 'q') { S.filter.q = e.target.value; renderSongList(); }
+  if (e.target.closest?.('#scoreForm')) updateScoreCalc();
   if (e.target.id === 'pickQ') { S.pick.q = e.target.value; renderPickSearch(); }
   if (e.target.id === 'slDate') { const sl = curSetlist(); if (sl && e.target.value) { sl.date = e.target.value; saveSetlist(sl); } }
 });
 document.addEventListener('change', async e => {
   const t = e.target;
+  if (t.closest?.('#scoreForm')) updateScoreCalc();
   if (t.id === 'sort') { S.filter.sort = t.value; renderSongList(); }
   if (t.id === 'sLow' || t.id === 'sHigh') {
     S.settings[t.id === 'sLow' ? 'low' : 'high'] = t.value;

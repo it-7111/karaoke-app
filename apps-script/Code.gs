@@ -23,14 +23,18 @@ const SONG_COLS = {
   kana: '曲名かな', artist: '歌手', artistKana: '歌手かな',
   ref: '参考音源', request: 'リクエスト', memo: 'メモ(app)', id: '_id',
 };
+// 配列は「新しい見出し, 作り替え前の見出し」の順で探す
 const SCORE_COLS = {
-  date: 'Date', title: 'name', point: 'point', machine: '機種とキー',
-  on: '音', hyo: '表', yoku: '抑', ai: 'Ai/聴', bonus: '加点',
+  date: 'Date', title: 'name', point: ['総合得点', 'point'], machine: '機種とキー',
+  on: ['音程', '音'], vlt: 'ビブラート&ロングトーン', rhythm: 'リズム', hyo: ['表現力', '表'],
+  stab: '安定性', choukan: '聴感', yoku: ['抑揚', '抑'], ai: 'Ai/聴', bonus: ['ボーナス点', '加点'],
   comment: 'コメント', key: 'キー', id: '_id',
 };
+// チャート合計・素点は数式で計算する列（アプリからは書き込まない）
+const CHART_ITEMS = ['音程', 'ビブラート&ロングトーン', 'リズム', '表現力', '安定性', '聴感'];
 // 見つからなければ右端に追加する列
 const APP_COLS = ['_id', 'メモ(app)'];
-const SCORE_NUMERIC = ['point', 'on', 'hyo', 'yoku', 'ai', 'bonus'];
+const SCORE_NUMERIC = ['point', 'on', 'vlt', 'rhythm', 'hyo', 'stab', 'choukan', 'yoku', 'ai', 'bonus'];
 const PDF_HEADERS = ['id', 'songId', 'songTitle', 'name', 'driveId', 'size', 'updatedAt', 'mime'];
 const SETLIST_HEADERS = ['id', 'date', 'name', 'json', 'updatedAt'];
 
@@ -180,8 +184,10 @@ function openTable_(ss, def) {
 
   const idx = {};
   Object.keys(def.cols).forEach(field => {
-    const h = def.cols[field];
-    let i = headers.indexOf(h);
+    const names = [].concat(def.cols[field]);
+    const h = names[0];
+    let i = -1;
+    names.some(n => (i = headers.indexOf(n)) >= 0);
     if (i < 0 && APP_COLS.indexOf(h) >= 0) {
       if (width + 1 > sheet.getMaxColumns()) sheet.insertColumnAfter(sheet.getMaxColumns());
       width++;
@@ -359,6 +365,85 @@ function listSetlists_(ss) {
       try { items = JSON.parse(r[3] || '[]'); } catch (e) { /* 壊れていたら空にする */ }
       return { id: str_(r[0]), date: toIsoDate_(r[1], ss.getSpreadsheetTimeZone()), name: str_(r[2]), items: items, updatedAt: Number(r[4]) || 0 };
     });
+}
+
+// ---------- 「カラオケ歌ったリスト」の作り替え（一度だけ手動で実行） ----------
+
+/**
+ * 評価項目を「音程・ビブラート&ロングトーン・リズム・表現力・安定性・聴感・チャート合計・抑揚」の並びにし、
+ * 素点（総合得点 − ボーナス点）の列を足す。旧データの値は書き換えない。
+ * 実行するとまずスプレッドシート全体のコピーをドライブに作る。
+ */
+function migrateScoreSheet() {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(CONFIG.SCORE_SHEET);
+  if (!sh) throw new Error('シート「' + CONFIG.SCORE_SHEET + '」が見つかりません');
+  const top = sh.getRange(1, 1, Math.min(5, sh.getMaxRows()), sh.getLastColumn()).getValues();
+  const hr = top.findIndex(r => r.some(c => norm_(c) === 'name')) + 1;
+  if (hr < 1) throw new Error('見出し「name」が見つかりません');
+  const col = name => sh.getRange(hr, 1, 1, sh.getLastColumn()).getValues()[0].map(norm_).indexOf(name) + 1;
+  if (col('チャート合計')) throw new Error('すでに作り替え済みです');
+  ['音', '表', '抑', 'point', '加点'].forEach(h => { if (!col(h)) throw new Error('見出し「' + h + '」が見つかりません'); });
+
+  // 他のシートの QUERY などは列の位置を文字で持っているので、列を足すとずれることがある
+  const risky = formulasToCheck_(ss);
+
+  const tz = ss.getSpreadsheetTimeZone();
+  const backup = DriveApp.getFileById(ss.getId()).makeCopy(ss.getName() + ' バックアップ ' + Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HHmm'));
+  Logger.log('バックアップを作りました: ' + backup.getUrl());
+
+  [['point', '総合得点'], ['音', '音程'], ['表', '表現力'], ['抑', '抑揚'], ['加点', 'ボーナス点']]
+    .forEach(([from, to]) => sh.getRange(hr, col(from)).setValue(to));
+
+  sh.insertColumnsAfter(col('音程'), 2);
+  sh.getRange(hr, col('音程') + 1, 1, 2).setValues([['ビブラート&ロングトーン', 'リズム']]);
+  sh.insertColumnsAfter(col('表現力'), 3);
+  sh.getRange(hr, col('表現力') + 1, 1, 3).setValues([['安定性', '聴感', 'チャート合計']]);
+  if (col('抑揚') !== col('チャート合計') + 1) {
+    sh.moveColumns(sh.getRange(1, col('抑揚'), sh.getMaxRows(), 1), col('チャート合計') + 1);
+  }
+  sh.insertColumnBefore(col('ボーナス点'));
+  sh.getRange(hr, col('ボーナス点') - 1).setValue('素点');
+
+  // 1つの数式で全行を計算する（行を足しても自動で計算される）
+  const r = hr + 1;
+  const L = name => colLetter_(col(name)) + r + ':' + colLetter_(col(name));
+  const items = CHART_ITEMS.map(L);
+  sh.getRange(r, col('チャート合計')).setFormula(
+    '=ARRAYFORMULA(IF((' + L('name') + '="")+(' + items.map(x => '(' + x + '="")').join('*') + '),"",' + items.join('+') + '))');
+  sh.getRange(r, col('素点')).setFormula(
+    '=ARRAYFORMULA(IF((' + L('name') + '="")+(' + L('総合得点') + '="")+(' + L('ボーナス点') + '=""),"",ROUND(' + L('総合得点') + '-' + L('ボーナス点') + ',3)))');
+
+  Logger.log('作り替えが終わりました。新しい並び: ' + sh.getRange(hr, 1, 1, sh.getLastColumn()).getValues()[0].filter(String).join(' | '));
+  if (risky.length) {
+    Logger.log('次の数式は列の位置を文字で参照している可能性があります。結果がずれていないか確認してください:');
+    risky.forEach(x => Logger.log(x));
+  } else {
+    Logger.log('列の位置を文字で参照する数式は見つかりませんでした。');
+  }
+  Logger.log('最後に「デプロイ → デプロイを管理 → 編集 → バージョン: 新バージョン」で同期サーバーを更新してください。');
+}
+
+function formulasToCheck_(ss) {
+  const out = [];
+  ss.getSheets().forEach(sh => {
+    if (sh.getLastRow() === 0 || sh.getLastColumn() === 0) return;
+    const f = sh.getRange(1, 1, sh.getLastRow(), sh.getLastColumn()).getFormulas();
+    f.forEach((row, i) => row.forEach((x, j) => {
+      if (!x) return;
+      const refersHere = x.indexOf(CONFIG.SCORE_SHEET) >= 0 || sh.getName() === CONFIG.SCORE_SHEET;
+      if (refersHere && /QUERY|INDIRECT|INDEX|OFFSET|VLOOKUP|HLOOKUP/i.test(x)) {
+        out.push(sh.getName() + '!' + colLetter_(j + 1) + (i + 1) + '  ' + x.slice(0, 160));
+      }
+    }));
+  });
+  return out;
+}
+
+function colLetter_(n) {
+  let s = '';
+  for (; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + (n - 1) % 26) + s;
+  return s;
 }
 
 // ---------- 小物 ----------

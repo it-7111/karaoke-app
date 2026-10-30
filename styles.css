@@ -248,3 +248,16 @@ main { max-width: 1100px; margin: 0 auto; padding: 12px 16px; }
 }
 @media (min-width: 800px) { .text-view { margin: 0 auto; } }
 .form textarea.big { min-height: 50vh; line-height: 1.7; }
+
+/* 点数フォームのチャート欄 */
+.form .chart-head { grid-column: 1 / -1; font-size: 13px; font-weight: 600; color: var(--muted); margin-top: 4px; }
+.form .chart-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.form .chart-grid label[hidden] { display: none; }
+.form .chart-grid small { font-size: 10px; }
+.form .chart-grid input { padding: 8px 8px; text-align: center; }
+.form .calc {
+  display: block; padding: 10px 12px; border-radius: 10px; border: 1px dashed var(--line);
+  background: var(--surface-2); color: var(--text); font-size: 16px; font-variant-numeric: tabular-nums; text-align: center;
+}
+.form .chart-grid label { justify-content: flex-end; line-height: 1.25; }
+.form .chart-grid label small { display: block; }
