@@ -261,3 +261,12 @@ main { max-width: 1100px; margin: 0 auto; padding: 12px 16px; }
 }
 .form .chart-grid label { justify-content: flex-end; line-height: 1.25; }
 .form .chart-grid label small { display: block; }
+
+/* 機種別の集計表 */
+.sum-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
+.sum-table { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sum-table th, .sum-table td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: right; }
+.sum-table thead th { font-size: 11px; color: var(--muted); font-weight: 600; line-height: 1.3; vertical-align: bottom; }
+.sum-table tbody tr:last-child th, .sum-table tbody tr:last-child td { border-bottom: 0; }
+.sum-table th:first-child { position: sticky; left: 0; background: var(--surface); text-align: left; z-index: 1; }
+.sum-table tbody tr:first-child th, .sum-table tbody tr:first-child td { font-weight: 700; }

@@ -180,14 +180,14 @@ function openTable_(ss, def) {
   const hi = top.findIndex(r => r.some(c => norm_(c) === def.keyHeader));
   if (hi < 0) throw new Error('「' + def.sheet + '」で見出し「' + def.keyHeader + '」が見つかりません');
   const headerRow = hi + 1;
-  const headers = top[hi].map(norm_);
+  const headers = top[hi].slice();
 
   const idx = {};
   Object.keys(def.cols).forEach(field => {
     const names = [].concat(def.cols[field]);
     const h = names[0];
     let i = -1;
-    names.some(n => (i = headers.indexOf(n)) >= 0);
+    names.some(n => (i = findHeader_(headers, n)) >= 0);
     if (i < 0 && APP_COLS.indexOf(h) >= 0) {
       if (width + 1 > sheet.getMaxColumns()) sheet.insertColumnAfter(sheet.getMaxColumns());
       width++;
@@ -381,7 +381,7 @@ function migrateScoreSheet() {
   const top = sh.getRange(1, 1, Math.min(5, sh.getMaxRows()), sh.getLastColumn()).getValues();
   const hr = top.findIndex(r => r.some(c => norm_(c) === 'name')) + 1;
   if (hr < 1) throw new Error('見出し「name」が見つかりません');
-  const col = name => sh.getRange(hr, 1, 1, sh.getLastColumn()).getValues()[0].map(norm_).indexOf(name) + 1;
+  const col = name => findHeader_(sh.getRange(hr, 1, 1, sh.getLastColumn()).getValues()[0], name) + 1;
   if (col('チャート合計')) throw new Error('すでに作り替え済みです');
   ['音', '表', '抑', 'point', '加点'].forEach(h => { if (!col(h)) throw new Error('見出し「' + h + '」が見つかりません'); });
 
@@ -446,7 +446,83 @@ function colLetter_(n) {
   return s;
 }
 
+// ---------- 「カラオケ点数リスト」に機種ごとの評価項目を足す（一度だけ手動で実行） ----------
+
+const SUMMARY_SHEET = 'カラオケ点数リスト';
+
+/**
+ * 全体・WAO・Ai・Dx の各ブロック（平均点〜加点の8列）に、
+ * ビブラート&ロングトーン・リズム・安定性・聴感（全体とWAOのみ）・チャート合計・素点の平均の列を足す。
+ * 既存の列は名前だけ「音程・表現力・抑揚・Ai/聴(旧)・ボーナス点」に揃え、数式はそのまま使う。
+ * 列の挿入なので、「点数分布」や ALL_RANK など他のシートからの参照はスプレッドシートが自動で付け替える。
+ */
+function upgradeScoreSummary() {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(SUMMARY_SHEET);
+  const log = ss.getSheetByName(CONFIG.SCORE_SHEET);
+  if (!sh || !log) throw new Error('「' + SUMMARY_SHEET + '」または「' + CONFIG.SCORE_SHEET + '」が見つかりません');
+  const head = () => sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  if (findHeader_(head(), 'チャート合計') >= 0) throw new Error('すでに追加済みです');
+
+  // 「カラオケ歌ったリスト」側の列（見出しで探す）
+  const logHead = log.getRange(1, 1, 1, log.getLastColumn()).getValues()[0];
+  const src = {};
+  ['ビブラート&ロングトーン', 'リズム', '安定性', '聴感', 'チャート合計', '素点'].forEach(n => {
+    const i = findHeader_(logHead, n);
+    if (i < 0) throw new Error('「' + CONFIG.SCORE_SHEET + '」に見出し「' + n + '」がありません。先に migrateScoreSheet を実行してください');
+    src[n] = colLetter_(i + 1);
+  });
+
+  // 平均点の列ごとにブロックを見つけ、2行目の数式から機種を読み取る
+  const h = head();
+  const f2 = sh.getRange(2, 1, 1, sh.getLastColumn()).getFormulas()[0];
+  const blocks = [];
+  h.forEach((v, i) => {
+    if (norm_(v) !== '平均点') return;
+    const m = String(f2[i]).match(/"="&"([^"]+)"/);
+    const end = (String(f2[i]).match(/B\$?2:\$?B\$?(\d+)/) || [])[1] || '1552';
+    blocks.push({ col: i + 1, machine: m ? m[1] : '', end: end });
+  });
+  if (!blocks.length) throw new Error('「平均点」の列が見つかりません');
+
+  const backup = DriveApp.getFileById(ss.getId()).makeCopy(ss.getName() + ' バックアップ ' + Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'yyyy-MM-dd HHmm'));
+  Logger.log('バックアップを作りました: ' + backup.getUrl());
+
+  const L = "'" + CONFIG.SCORE_SHEET + "'!";
+  const avgFormula = (letter, b) => '=IF($B$2:$B' + b.end + '="","",BYROW($B$2:$B' + b.end + ',LAMBDA(a,IFERROR(AVERAGEIFS(' +
+    L + letter + '$2:' + letter + b.end + ',' + L + '$B$2:$B' + b.end + ',"="&a' +
+    (b.machine ? ',' + L + '$D$2:$D' + b.end + ',"="&"' + b.machine + '"' : '') + '),""))))';
+  const put = (c, name, b) => {
+    sh.getRange(1, c).setValue(name);
+    sh.getRange(2, c).setFormula(avgFormula(src[name], b));
+  };
+
+  // 右のブロックから処理すると、左のブロックの位置がずれない
+  blocks.sort((a, b) => b.col - a.col).forEach(b => {
+    const s = b.col; // s:平均点 s+1:最高点 s+2:最低点 s+3:音 s+4:表 s+5:抑 s+6:Ai/聴 s+7:加点
+    sh.getRange(1, s + 3, 1, 5).setValues([['音程', '表現力', '抑揚', 'Ai/聴(旧)', 'ボーナス点']]);
+    sh.insertColumnsAfter(s + 7, 1);            // ボーナス点の右に素点
+    put(s + 8, '素点', b);
+    const after = ['安定性'].concat(!b.machine || b.machine === 'WAO' ? ['聴感'] : [], ['チャート合計']);
+    sh.insertColumnsAfter(s + 4, after.length); // 表現力の右
+    after.forEach((n, k) => put(s + 5 + k, n, b));
+    sh.insertColumnsAfter(s + 3, 2);            // 音程の右
+    put(s + 4, 'ビブラート&ロングトーン', b);
+    put(s + 5, 'リズム', b);
+    Logger.log((b.machine || '全体') + ' のブロックに列を追加しました');
+  });
+  Logger.log('新しい見出し: ' + head().filter(String).slice(0, 80).join(' | '));
+}
+
 // ---------- 小物 ----------
+
+// 見出しの照合。「状況 146/462」のような後ろの補足は無視し、「ビブラート&⏎ロングトーン」のような途中の改行は詰めて比べる
+function findHeader_(cells, name) {
+  for (let i = 0; i < cells.length; i++) {
+    if (norm_(cells[i]) === name || String(cells[i] === null || cells[i] === undefined ? '' : cells[i]).replace(/\s+/g, '') === name) return i;
+  }
+  return -1;
+}
 
 function norm_(v) {
   return String(v === null || v === undefined ? '' : v).trim().split(/\s+/)[0];

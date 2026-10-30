@@ -664,8 +664,6 @@ function songDetailHtml(song) {
         </button>
         <button class="btn danger" data-action="del-pdf" data-id="${p.id}">削除</button>
       </div>`;
-  const byMachine = {};
-  scores.forEach(s => { const m = machineGroup(s.machine); (byMachine[m] ||= []).push(s.point); });
   const rows = (k, v) => (v ? `<dt>${k}</dt><dd>${v}</dd>` : '');
   const isUrl = u => /^https?:\/\//.test(u || '');
   return `<div class="detail">
@@ -686,10 +684,9 @@ function songDetailHtml(song) {
       <div class="tile"><div class="l">最高</div><div class="v">${fmt3(x.max)}</div></div>
       <div class="tile"><div class="l">最低</div><div class="v">${fmt3(x.min)}</div></div>
     </div>
-    <div class="card" style="margin-top:8px">${trendChart(scores)}
-      ${chartAvgHtml(scores)}
-      <div class="help" style="margin-top:6px">${Object.entries(byMachine).map(([m, a]) => `${esc(m)}: 平均 ${fmt3(a.reduce((p, c) => p + c, 0) / a.length)}（${a.length}回）`).join('　')}</div>
-    </div>` : '<div class="card empty">まだ点数の記録がありません</div>'}
+    <div class="card" style="margin-top:8px">${trendChart(scores)}</div>
+    <div class="section-h">機種別の集計</div>
+    ${machineTableHtml(scores)}` : '<div class="card empty">まだ点数の記録がありません</div>'}
 
     <div class="section-h">ディレクション・歌詞解釈<span><button data-action="add-pdf" data-id="${song.id}">＋ファイル</button><button data-action="new-text" data-id="${song.id}">＋テキスト</button></span></div>
     <input type="file" id="pdfInput" accept="application/pdf,.pdf,text/plain,.txt,.md" multiple hidden data-id="${song.id}">
@@ -714,13 +711,32 @@ function songDetailHtml(song) {
   </div>`;
 }
 
-function chartAvgHtml(scores) {
-  const avg = k => { const v = scores.map(s => s[k]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
-  const parts = CHART.map(([k, l]) => [l, avg(k)]).filter(([, a]) => a != null);
-  const totals = scores.map(chartTotal).filter(x => x != null);
-  if (!parts.length) return '';
-  const r1 = x => Math.round(x * 10) / 10;
-  return `<div class="help" style="margin-top:6px">チャート平均：${parts.map(([l, a]) => `${l} ${r1(a)}`).join('・')}${totals.length ? `・合計 ${r1(totals.reduce((a, b) => a + b, 0) / totals.length)}` : ''}</div>`;
+// 「カラオケ点数リスト」と同じ集計（機種ごとの平均・最高・最低、素点・ボーナス点・チャート各項目・抑揚の平均）
+const SUMMARY_COLS = [
+  ['avg', '平均点', 3], ['max', '最高点', 3], ['min', '最低点', 3],
+  ['on', '音程', 1], ['vlt', 'ビブラート&ロングトーン', 1], ['rhythm', 'リズム', 1], ['hyo', '表現力', 1], ['stab', '安定性', 1], ['choukan', '聴感', 1],
+  ['total', 'チャート合計', 1], ['yoku', '抑揚', 1], ['bonus', 'ボーナス点', 3], ['raw', '素点', 3],
+];
+function summarize(scores) {
+  const mean = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+  const pick = f => scores.map(f).filter(x => x != null);
+  const pts = pick(s => s.point);
+  const r = { n: scores.length, avg: mean(pts), max: pts.length ? Math.max(...pts) : null, min: pts.length ? Math.min(...pts) : null, total: mean(pick(chartTotal)), raw: mean(pick(rawScore)) };
+  ['on', 'vlt', 'rhythm', 'hyo', 'stab', 'choukan', 'yoku', 'bonus'].forEach(k => { r[k] = mean(pick(s => s[k])); });
+  return r;
+}
+function machineTableHtml(scores) {
+  if (!scores.length) return '';
+  const groups = new Map([['全体', scores]]);
+  const order = [...MACHINES, ...new Set(scores.map(s => machineGroup(s.machine)))];
+  order.forEach(m => { const a = scores.filter(s => machineGroup(s.machine) === m); if (a.length && !groups.has(m)) groups.set(m, a); });
+  const rows = [...groups].map(([m, a]) => [m, summarize(a)]);
+  const cols = SUMMARY_COLS.filter(([k]) => rows.some(([, r]) => r[k] != null));
+  const fmt = (v, d) => (v == null ? '–' : d === 3 ? fmt3(v) : (Math.round(v * 10) / 10).toFixed(1));
+  return `<div class="sum-wrap"><table class="sum-table">
+    <thead><tr><th>機種</th><th>回数</th>${cols.map(([, l]) => `<th>${esc(l).replace('&amp;', '&amp;<br>').replace('チャート合計', 'チャート<br>合計')}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(([m, r]) => `<tr><th>${esc(m)}</th><td>${r.n}</td>${cols.map(([k, , d]) => `<td>${fmt(r[k], d)}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div>`;
 }
 
 function scoreRowHtml(s, { showTitle = false } = {}) {
@@ -987,6 +1003,7 @@ function statsHtml() {
     <div class="tile"><div class="l">最高点</div><div class="v">${fmt3(Math.max(...pts))}</div></div>
     <div class="tile"><div class="l">今年</div><div class="v">${ytd}<small>回</small></div></div>
   </div>
+  <div class="section-h">機種別の集計（全曲）</div>${machineTableHtml(S.scores)}
   <div class="section-h">点数分布</div><div class="card">${hist}</div>
   <div class="section-h">月別の歌唱回数（直近12か月）</div><div class="card">${monthly}</div>
   <div class="section-h">ランキング</div>
