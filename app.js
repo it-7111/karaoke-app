@@ -20,6 +20,11 @@ const SCORE_FIELDS = ['date', 'title', 'point', 'machine', 'on', 'vlt', 'rhythm'
 // チャートの評価項目（聴感は Ai-Heart＝WAO のみ）。チャート合計はこれらの合計
 const CHART = [['on', '音程', '音'], ['vlt', 'ビブラート&ロングトーン', 'ビ'], ['rhythm', 'リズム', 'リ'], ['hyo', '表現力', '表'], ['stab', '安定性', '安'], ['choukan', '聴感', '聴']];
 const chartTotal = s => { const v = CHART.map(([k]) => s[k]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) : null; };
+// WAO は6項目600点、他は5項目500点なので、500点満点に揃えて比べる。全項目が入った記録だけ出す（シートの「500点換算」と同じ）
+const chartScaled = s => {
+  if (CHART.some(([k]) => k !== 'choukan' && s[k] == null) || (isHeart(s.machine) && s.choukan == null)) return null;
+  return Math.round(chartTotal(s) * 5 / (s.choukan != null ? 6 : 5) * 10) / 10;
+};
 const rawScore = s => (s.point != null && s.bonus != null ? Math.round((s.point - s.bonus) * 1000) / 1000 : null);
 const isHeart = m => machineGroup(m) === 'WAO';
 const MACHINES = ['Dx', 'Ai', 'WAO', 'JoyAI'];
@@ -715,13 +720,14 @@ function songDetailHtml(song) {
 const SUMMARY_COLS = [
   ['avg', '平均点', 3], ['max', '最高点', 3], ['min', '最低点', 3],
   ['on', '音程', 1], ['vlt', 'ビブラート&ロングトーン', 1], ['rhythm', 'リズム', 1], ['hyo', '表現力', 1], ['stab', '安定性', 1], ['choukan', '聴感', 1],
-  ['total', 'チャート合計', 1], ['yoku', '抑揚', 1], ['bonus', 'ボーナス点', 3], ['raw', '素点', 3],
+  ['total', 'チャート合計', 1], ['scaled', '500点換算', 1], ['gap', '満点との差', 1], ['yoku', '抑揚', 1], ['bonus', 'ボーナス点', 3], ['raw', '素点', 3],
 ];
 function summarize(scores) {
   const mean = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
   const pick = f => scores.map(f).filter(x => x != null);
   const pts = pick(s => s.point);
-  const r = { n: scores.length, avg: mean(pts), max: pts.length ? Math.max(...pts) : null, min: pts.length ? Math.min(...pts) : null, total: mean(pick(chartTotal)), raw: mean(pick(rawScore)) };
+  const r = { n: scores.length, avg: mean(pts), max: pts.length ? Math.max(...pts) : null, min: pts.length ? Math.min(...pts) : null, total: mean(pick(chartTotal)), scaled: mean(pick(chartScaled)), raw: mean(pick(rawScore)) };
+  r.gap = r.scaled == null ? null : 500 - r.scaled;
   ['on', 'vlt', 'rhythm', 'hyo', 'stab', 'choukan', 'yoku', 'bonus'].forEach(k => { r[k] = mean(pick(s => s[k])); });
   return r;
 }
@@ -734,16 +740,17 @@ function machineTableHtml(scores) {
   const cols = SUMMARY_COLS.filter(([k]) => rows.some(([, r]) => r[k] != null));
   const fmt = (v, d) => (v == null ? '–' : d === 3 ? fmt3(v) : (Math.round(v * 10) / 10).toFixed(1));
   return `<div class="sum-wrap"><table class="sum-table">
-    <thead><tr><th>機種</th><th>回数</th>${cols.map(([, l]) => `<th>${esc(l).replace('&amp;', '&amp;<br>').replace('チャート合計', 'チャート<br>合計')}</th>`).join('')}</tr></thead>
+    <thead><tr><th>機種</th><th>回数</th>${cols.map(([, l]) => `<th>${esc(l).replace('&amp;', '&amp;<br>').replace('チャート合計', 'チャート<br>合計').replace('500点換算', '500点<br>換算').replace('満点との差', '満点<br>との差')}</th>`).join('')}</tr></thead>
     <tbody>${rows.map(([m, r]) => `<tr><th>${esc(m)}</th><td>${r.n}</td>${cols.map(([k, , d]) => `<td>${fmt(r[k], d)}</td>`).join('')}</tr>`).join('')}</tbody>
   </table></div>`;
 }
 
 function scoreRowHtml(s, { showTitle = false } = {}) {
-  const total = chartTotal(s), raw = rawScore(s);
+  const total = chartTotal(s), raw = rawScore(s), scaled = chartScaled(s);
   const sub = [
     CHART.filter(([k]) => s[k] != null).map(([k, , a]) => `${a}${s[k]}`).join(' '),
     total != null ? `計${total}` : '',
+    scaled != null ? `500点換算${scaled}` : '',
     s.yoku != null ? `抑揚${s.yoku}` : '',
     s.ai != null ? `旧Ai/聴${s.ai}` : '',
     raw != null ? `素点${fmt3(raw)}` : '',
@@ -1121,6 +1128,7 @@ function scoreForm(score, presetTitle) {
       <div class="chart-grid">
         ${CHART.map(([k, l]) => `<label class="${k === 'choukan' ? 'heart-only' : ''}" ${k === 'choukan' && !isHeart(s.machine) ? 'hidden' : ''}>${l}${k === 'choukan' ? '<small>（Ai-Heart）</small>' : ''}<input name="${k}" inputmode="decimal" value="${v(s[k])}"></label>`).join('')}
         <label>チャート合計（自動）<output id="totalOut" class="calc">–</output></label>
+        <label>500点換算（自動）<output id="scaledOut" class="calc">–</output></label>
         <label>抑揚<input name="yoku" inputmode="decimal" value="${v(s.yoku)}"></label>
       </div>
       ${s.ai != null ? `<div class="full help">旧項目「Ai/聴」: ${esc(s.ai)}（スプレッドシートにそのまま残っています）</div>` : ''}
@@ -1137,10 +1145,12 @@ function updateScoreCalc() {
   if (!f) return;
   const heart = isHeart(f.machine.value);
   f.querySelector('.heart-only').hidden = !heart;
-  const rec = { point: numOrNull(f.point.value), bonus: numOrNull(f.bonus.value) };
+  const rec = { machine: f.machine.value, point: numOrNull(f.point.value), bonus: numOrNull(f.bonus.value) };
   CHART.forEach(([k]) => { rec[k] = k === 'choukan' && !heart ? null : numOrNull(f[k].value); });
   const total = chartTotal(rec), raw = rawScore(rec);
   $('#totalOut').textContent = total == null ? '–' : String(Math.round(total * 1000) / 1000);
+  const scaled = chartScaled(rec);
+  $('#scaledOut').textContent = scaled == null ? '–' : `${scaled.toFixed(1)}（差 ${(500 - scaled).toFixed(1)}）`;
   $('#rawOut').textContent = raw == null ? '–' : fmt3(raw);
 }
 

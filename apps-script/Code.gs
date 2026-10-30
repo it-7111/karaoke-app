@@ -488,13 +488,9 @@ function upgradeScoreSummary() {
   const backup = DriveApp.getFileById(ss.getId()).makeCopy(ss.getName() + ' バックアップ ' + Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'yyyy-MM-dd HHmm'));
   Logger.log('バックアップを作りました: ' + backup.getUrl());
 
-  const L = "'" + CONFIG.SCORE_SHEET + "'!";
-  const avgFormula = (letter, b) => '=IF($B$2:$B' + b.end + '="","",BYROW($B$2:$B' + b.end + ',LAMBDA(a,IFERROR(AVERAGEIFS(' +
-    L + letter + '$2:' + letter + b.end + ',' + L + '$B$2:$B' + b.end + ',"="&a' +
-    (b.machine ? ',' + L + '$D$2:$D' + b.end + ',"="&"' + b.machine + '"' : '') + '),""))))';
   const put = (c, name, b) => {
     sh.getRange(1, c).setValue(name);
-    sh.getRange(2, c).setFormula(avgFormula(src[name], b));
+    sh.getRange(2, c).setFormula(summaryAvgFormula_(src[name], b));
   };
 
   // 右のブロックから処理すると、左のブロックの位置がずれない
@@ -512,6 +508,64 @@ function upgradeScoreSummary() {
     Logger.log((b.machine || '全体') + ' のブロックに列を追加しました');
   });
   Logger.log('新しい見出し: ' + head().filter(String).slice(0, 80).join(' | '));
+}
+
+function summaryAvgFormula_(letter, b) {
+  const L = "'" + CONFIG.SCORE_SHEET + "'!";
+  return '=IF($B$2:$B' + b.end + '="","",BYROW($B$2:$B' + b.end + ',LAMBDA(a,IFERROR(AVERAGEIFS(' +
+    L + letter + '$2:' + letter + b.end + ',' + L + '$B$2:$B' + b.end + ',"="&a' +
+    (b.machine ? ',' + L + '$D$2:$D' + b.end + ',"="&"' + b.machine + '"' : '') + '),""))))';
+}
+
+// ---------- WAO（600点満点）と他機種（500点満点）を比べる「500点換算」を足す（一度だけ手動で実行） ----------
+
+const SCALED_HEADER = '500点換算';
+
+/**
+ * 「カラオケ歌ったリスト」のチャート合計の右に、チャート合計 × 5 ÷ 項目数 の列を足し、
+ * 「カラオケ点数リスト」の各ブロックのチャート合計の右に、その平均の列を足す。
+ * 全項目（WAO は聴感も）が入った行だけ計算するので、書き換え途中の旧データは平均に混ざらない。
+ */
+function addChartScaled() {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(SUMMARY_SHEET);
+  const log = ss.getSheetByName(CONFIG.SCORE_SHEET);
+  if (!sh || !log) throw new Error('「' + SUMMARY_SHEET + '」または「' + CONFIG.SCORE_SHEET + '」が見つかりません');
+  const logHead = () => log.getRange(1, 1, 1, log.getLastColumn()).getValues()[0];
+  const head = () => sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  if (findHeader_(logHead(), SCALED_HEADER) >= 0 || findHeader_(head(), SCALED_HEADER) >= 0) throw new Error('すでに追加済みです');
+  if (findHeader_(head(), 'チャート合計') < 0) throw new Error('「' + SUMMARY_SHEET + '」にチャート合計がありません。先に upgradeScoreSummary を実行してください');
+  const col = n => findHeader_(logHead(), n) + 1;
+  const names = ['name', '音程', 'ビブラート&ロングトーン', 'リズム', '表現力', '安定性', '聴感', 'チャート合計'];
+  names.forEach(n => { if (!col(n)) throw new Error('「' + CONFIG.SCORE_SHEET + '」に見出し「' + n + '」がありません'); });
+  const machineCol = col('機種') || col('機種とキー');
+  if (!machineCol) throw new Error('「' + CONFIG.SCORE_SHEET + '」に見出し「機種」がありません');
+
+  const backup = DriveApp.getFileById(ss.getId()).makeCopy(ss.getName() + ' バックアップ ' + Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'yyyy-MM-dd HHmm'));
+  Logger.log('バックアップを作りました: ' + backup.getUrl());
+
+  const scaledCol = col('チャート合計') + 1;
+  log.insertColumnsAfter(col('チャート合計'), 1);
+  log.getRange(1, scaledCol).setValue(SCALED_HEADER);
+  const L = c => colLetter_(c) + '2:' + colLetter_(c);
+  const blank = ['name', '音程', 'ビブラート&ロングトーン', 'リズム', '表現力', '安定性'].map(n => '(' + L(col(n)) + '="")').join('+');
+  const choukan = L(col('聴感'));
+  log.getRange(2, scaledCol).setFormula('=ARRAYFORMULA(IF(' + blank + '+((' + L(machineCol) + '="WAO")*(' + choukan + '="")),"",ROUND(' +
+    L(col('チャート合計')) + '*5/(5+(' + choukan + '<>"")),1)))');
+
+  // 右のブロックから処理すると、左のブロックの位置がずれない
+  const h = head();
+  const f2 = sh.getRange(2, 1, 1, sh.getLastColumn()).getFormulas()[0];
+  for (let i = h.length - 1; i >= 0; i--) {
+    if (String(h[i]).replace(/\s+/g, '') !== 'チャート合計') continue;
+    const m = String(f2[i]).match(/"="&"([^"]+)"/);
+    const end = (String(f2[i]).match(/B\$?2:\$?B\$?(\d+)/) || [])[1] || '1552';
+    const b = { machine: m ? m[1] : '', end: end };
+    sh.insertColumnsAfter(i + 1, 1);
+    sh.getRange(1, i + 2).setValue(SCALED_HEADER);
+    sh.getRange(2, i + 2).setFormula(summaryAvgFormula_(colLetter_(scaledCol), b));
+    Logger.log((b.machine || '全体') + ' のブロックに ' + SCALED_HEADER + ' を追加しました');
+  }
 }
 
 // ---------- 小物 ----------
