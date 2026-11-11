@@ -79,6 +79,9 @@ const lastKana = song => { const c = hiraChars(song).pop(); return c ? (SMALL_KA
 
 const isAudio = f => String(f.mime || '').startsWith('audio/');
 const isText = f => String(f.mime || '').startsWith('text/');
+const INK_MIME = 'application/x-karaoke-ink+json';
+const isInk = f => f.mime === INK_MIME;
+const inkId = p => `ink-${p.id}`;
 const textTitle = f => String(f.name || '').replace(/\.(txt|md)$/i, '');
 const fmtSize = n => (n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))}KB` : `${(n / 1024 / 1024).toFixed(1)}MB`);
 function guessMime(file) {
@@ -278,9 +281,14 @@ async function saveTextNote(song, meta, title, body) {
   Object.assign(meta, { name, size: blob.size, mime: 'text/plain', updatedAt: Date.now(), hasBlob: true });
   await idb.put('pdfBlobs', blob, meta.id);
   await idb.put('pdfs', meta);
-  const pending = (await idb.all('outbox')).some(o => o.kind === 'pdf' && o.op === 'upload' && o.id === meta.id && !S.inflight.has(o.seq));
-  if (pending) scheduleSync(); else await queue({ kind: 'pdf', op: 'upload', id: meta.id });
+  await queueUpload(meta.id);
   changed();
+}
+
+// 同じファイルの送信待ちがあれば、それが最新の中身を送るので増やさない
+async function queueUpload(id) {
+  const pending = (await idb.all('outbox')).some(o => o.kind === 'pdf' && o.op === 'upload' && o.id === id && !S.inflight.has(o.seq));
+  if (pending) scheduleSync(); else await queue({ kind: 'pdf', op: 'upload', id });
 }
 
 async function textForm(song, meta) {
@@ -290,6 +298,7 @@ async function textForm(song, meta) {
     <div class="sheet-head"><button data-action="close-modal">キャンセル</button><h2>${meta ? 'テキストを編集' : 'テキストを追加'}</h2><button data-action="save-text">保存</button></div>
     <form class="form" id="textForm" data-song="${song.id}" data-id="${meta?.id || ''}">
       <label class="full">タイトル<input name="title" value="${esc(meta ? textTitle(meta) : 'ディレクション')}" autocomplete="off"></label>
+      ${meta && S.pdfs.some(x => x.id === inkId(meta)) ? '<div class="full help">手書きがあります。本文を変えると、手書きの位置がずれることがあります</div>' : ''}
       <label class="full">本文<textarea name="body" class="big" placeholder="歌詞の解釈、歌い方の指示、ブレス位置など">${esc(body)}</textarea></label>
     </form>`);
 }
@@ -323,6 +332,9 @@ async function deleteSetlist(sl) {
 }
 
 async function deletePdf(p) {
+  if (!S.pdfs.some(x => x.id === p.id)) return; // 元のファイルと一緒に消えた手書き
+  const ink = S.pdfs.find(x => x.id === inkId(p));
+  if (ink) await deletePdf(ink);
   S.pdfs = S.pdfs.filter(x => x.id !== p.id);
   await idb.del('pdfs', p.id);
   await idb.del('pdfBlobs', p.id);
@@ -603,7 +615,7 @@ function filteredSongs() {
   const f = S.filter;
   const st = songStats();
   const q = normalize(f.q);
-  const pdfSongs = new Set(S.pdfs.filter(p => !isAudio(p)).map(p => p.songId)); // PDF かテキストのディレクションがある曲
+  const pdfSongs = new Set(S.pdfs.filter(p => !isAudio(p) && !isInk(p)).map(p => p.songId)); // PDF かテキストのディレクションがある曲
   let list = S.songs.filter(s => {
     if (q && ![s.title, s.kana, s.artist, s.artistKana].some(x => normalize(x).includes(q))) return false;
     if (f.status === 'OK' && s.status !== 'OK') return false;
@@ -634,7 +646,7 @@ function renderSongList() {
   const list = filteredSongs();
   const st = songStats();
   const pdfCount = new Map(), recCount = new Map();
-  S.pdfs.forEach(p => { const m = isAudio(p) ? recCount : pdfCount; m.set(p.songId, (m.get(p.songId) || 0) + 1); });
+  S.pdfs.filter(p => !isInk(p)).forEach(p => { const m = isAudio(p) ? recCount : pdfCount; m.set(p.songId, (m.get(p.songId) || 0) + 1); });
   if (!S.songs.length) {
     box.innerHTML = `<div class="card empty">曲がまだありません。<br>設定タブでスプレッドシートと同期するか、<br><button class="btn primary" data-action="new-song" style="margin-top:12px">曲を追加</button></div>`;
     return;
@@ -659,7 +671,7 @@ function renderSongList() {
 function songDetailHtml(song) {
   const scores = S.scores.filter(s => s.title === song.title && s.point != null);
   const x = songStats().get(song.title);
-  const pdfs = S.pdfs.filter(p => p.songId === song.id && !isAudio(p)).sort((a, b) => a.updatedAt - b.updatedAt);
+  const pdfs = S.pdfs.filter(p => p.songId === song.id && !isAudio(p) && !isInk(p)).sort((a, b) => a.updatedAt - b.updatedAt);
   const recs = S.pdfs.filter(p => p.songId === song.id && isAudio(p));
   const fit = keyFit(song);
   const attachRow = p => `<div class="row">
@@ -1258,6 +1270,10 @@ async function openPdf(p) {
   $('#viewerTitle').textContent = p.name;
   document.querySelectorAll('#viewer [data-action="zoom"]').forEach(b => { b.hidden = isAudio(p); });
   $('#viewerEdit').hidden = !isText(p);
+  $('#viewerInk').hidden = isAudio(p);
+  if (viewerState?.ink?.saveTimer) saveInk(viewerState.p, viewerState.ink);
+  viewerState = null;
+  syncInkMode();
   pages.innerHTML = '<div class="msg">読み込み中…</div>';
   viewer.hidden = false;
   try {
@@ -1268,8 +1284,11 @@ async function openPdf(p) {
       blob = await fetchPdfBlob(p);
     }
     if (isText(p)) {
-      viewerState = { p, blob, text: true, zoom: viewerState?.text ? viewerState.zoom : 1 };
-      pages.innerHTML = `<div class="text-view" style="font-size:${16 * viewerState.zoom}px">${esc(await blob.text()) || '<span style="color:#999">（空です）</span>'}</div>`;
+      // 本文の枠を文字数（22文字分）で固定し、文字の大きさで拡大する。改行位置が端末や拡大率で変わらないので、手書きの位置もずれない
+      const fit = Math.max(12, (pages.clientWidth - 32) / 22);
+      viewerState = { p, blob, text: true, fit, zoom: Math.min(1, 20 / fit), ink: await loadInk(p) };
+      pages.innerHTML = `<div class="text-view" style="font-size:${fit * viewerState.zoom}px">${esc(await blob.text()) || '<span style="color:#999">（空です）</span>'}</div>`;
+      attachInk($('#viewerPages .text-view'), 't');
       return;
     }
     if (isAudio(p)) {
@@ -1282,7 +1301,7 @@ async function openPdf(p) {
       window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
     }
     const doc = await window.pdfjsLib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()) }).promise;
-    viewerState = { p, blob, doc, zoom: 1, token: 0 };
+    viewerState = { p, blob, doc, zoom: 1, token: 0, ink: await loadInk(p) };
     await renderPdfPages();
   } catch (e) {
     pages.innerHTML = `<div class="msg">${esc(e.message || e)}</div>`;
@@ -1301,19 +1320,225 @@ async function renderPdfPages() {
     const page = await vs.doc.getPage(i);
     const base = page.getViewport({ scale: 1 });
     const vp = page.getViewport({ scale: (width / base.width) * dpr });
+    const wrap = document.createElement('div');
+    wrap.className = 'page-wrap';
     const c = document.createElement('canvas');
     c.width = vp.width; c.height = vp.height;
     c.style.width = `${vp.width / dpr}px`; c.style.height = `${vp.height / dpr}px`;
-    pages.appendChild(c);
+    wrap.appendChild(c);
+    pages.appendChild(wrap);
+    attachInk(wrap, String(i));
     await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
   }
 }
 function closeViewer() {
+  if (viewerState?.ink?.saveTimer) saveInk(viewerState.p, viewerState.ink);
   $('#viewer').hidden = true;
   $('#viewerPages').innerHTML = '';
   viewerState?.doc?.destroy();
   if (viewerState?.url) URL.revokeObjectURL(viewerState.url);
   viewerState = null;
+  syncInkMode();
+}
+
+// ============================================================
+// 手書き（PDF・テキストの上に書き込む）
+// ============================================================
+// 手書きは元のファイルとは別の添付（id: ink-<元のid>、JSON）として保存・同期する。元の PDF やテキストは書き換えない。
+// 座標はページ（テキストは本文の枠）の幅を 1 とした値なので、拡大率や端末が変わっても同じ位置に出る。
+const INK_TOOLS = {
+  red: { c: '#e5484d', w: 0.004 }, blue: { c: '#2f6fdb', w: 0.004 }, black: { c: '#1c1a22', w: 0.004 },
+  marker: { c: '#ffd60a', w: 0.022, m: 1 },
+};
+const ERASER_R = 0.012;
+const inkPrefs = (() => { try { return JSON.parse(localStorage.getItem('inkPrefs')) || {}; } catch { return {}; } })();
+function saveInkPrefs() { try { localStorage.setItem('inkPrefs', JSON.stringify(inkPrefs)); } catch { /* 保存できなくても動く */ } }
+
+async function loadInk(p) {
+  const meta = S.pdfs.find(x => x.id === inkId(p));
+  let blob = meta ? await idb.get('pdfBlobs', meta.id) : null;
+  if (meta && !blob && meta.driveId && navigator.onLine) { try { blob = await fetchPdfBlob(meta); } catch { /* 手書きなしで開く */ } }
+  let data = null;
+  try { data = blob ? JSON.parse(await blob.text()) : null; } catch { /* 壊れていたら空から */ }
+  return {
+    pages: data?.pages || {}, layers: new Map(), undo: [], on: false, saveTimer: null,
+    tool: inkPrefs.tool || 'red',
+    finger: inkPrefs.finger ?? !(window.matchMedia?.('(min-width: 700px)').matches),
+  };
+}
+
+// 描画面（PDF のページ・テキストの枠）に重ねるキャンバスを作る
+function attachInk(host, key) {
+  const ink = viewerState?.ink;
+  if (!ink) return;
+  host.querySelector(':scope > .ink-layer')?.remove();
+  const layer = document.createElement('canvas');
+  layer.className = 'ink-layer';
+  layer.dataset.key = key;
+  host.appendChild(layer);
+  ink.layers.set(key, layer);
+  sizeInkLayer(layer);
+  bindInkLayer(layer);
+  syncInkMode();
+}
+function sizeInkLayer(layer) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = layer.parentElement.clientWidth, h = layer.parentElement.clientHeight;
+  layer.width = Math.round(w * dpr); layer.height = Math.round(h * dpr);
+  layer.style.width = `${w}px`; layer.style.height = `${h}px`;
+  redrawInk(layer);
+}
+function redrawInk(layer) {
+  const ink = viewerState?.ink;
+  if (!ink) return;
+  const ctx = layer.getContext('2d');
+  const W = layer.width;
+  ctx.clearRect(0, 0, layer.width, layer.height);
+  (ink.pages[layer.dataset.key] || []).forEach(s => drawStroke(ctx, s, W));
+}
+function drawStroke(ctx, s, W) {
+  const p = s.p;
+  ctx.save();
+  ctx.strokeStyle = s.c; ctx.fillStyle = s.c;
+  ctx.lineWidth = s.w * W; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.globalAlpha = s.m ? 0.4 : 1;
+  if (p.length === 2) {
+    ctx.beginPath(); ctx.arc(p[0] * W, p[1] * W, (s.w * W) / 2, 0, Math.PI * 2); ctx.fill();
+  } else {
+    // 点と点の中間を通る曲線にして、なめらかにする
+    ctx.beginPath(); ctx.moveTo(p[0] * W, p[1] * W);
+    for (let i = 2; i < p.length - 2; i += 2) {
+      ctx.quadraticCurveTo(p[i] * W, p[i + 1] * W, ((p[i] + p[i + 2]) / 2) * W, ((p[i + 1] + p[i + 3]) / 2) * W);
+    }
+    ctx.lineTo(p[p.length - 2] * W, p[p.length - 1] * W);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// Apple Pencil は常に書く。指は「指で書く」がオンのときだけ書き、オフならスクロールに使う
+const inkAccepts = (ink, e) => e.pointerType === 'pen' || e.pointerType === 'mouse' || (e.pointerType === 'touch' && ink.finger);
+function bindInkLayer(layer) {
+  let cur = null;
+  const pt = e => {
+    const r = layer.getBoundingClientRect();
+    return [Math.round(((e.clientX - r.left) / r.width) * 1e4) / 1e4, Math.round(((e.clientY - r.top) / r.width) * 1e4) / 1e4];
+  };
+  // iPad の Safari はペンでもスクロールしてしまうので、ペンのタッチだけスクロールを止める
+  const stopPen = e => { if (viewerState?.ink?.on && [...e.touches].some(t => t.touchType === 'stylus')) e.preventDefault(); };
+  layer.addEventListener('touchstart', stopPen, { passive: false });
+  layer.addEventListener('touchmove', stopPen, { passive: false });
+  layer.addEventListener('pointerdown', e => {
+    const ink = viewerState?.ink;
+    if (!ink?.on || !inkAccepts(ink, e) || cur) return;
+    if (e.pointerType === 'pen' && ink.finger && !inkPrefs.sawPen) {
+      // ペンが使われたら、指はスクロール用に戻す
+      inkPrefs.sawPen = true; ink.finger = false; inkPrefs.finger = false; saveInkPrefs(); syncInkMode();
+    }
+    e.preventDefault();
+    try { layer.setPointerCapture(e.pointerId); } catch { /* 取れなくても書ける */ }
+    const key = layer.dataset.key;
+    const list = ink.pages[key] || (ink.pages[key] = []);
+    if (ink.tool === 'eraser') {
+      cur = { id: e.pointerId, erase: { key, removed: [] } };
+      eraseAt(layer, pt(e), cur.erase);
+    } else {
+      const t = INK_TOOLS[ink.tool];
+      const s = { c: t.c, w: t.w, p: pt(e) };
+      if (t.m) s.m = 1;
+      list.push(s);
+      cur = { id: e.pointerId, s, key };
+      redrawInk(layer);
+    }
+  });
+  layer.addEventListener('pointermove', e => {
+    if (!cur || e.pointerId !== cur.id) return;
+    e.preventDefault();
+    const co = e.getCoalescedEvents?.();
+    const evs = co?.length ? co : [e];
+    if (cur.erase) { evs.forEach(ev => eraseAt(layer, pt(ev), cur.erase)); return; }
+    evs.forEach(ev => {
+      const [x, y] = pt(ev), p = cur.s.p;
+      if (Math.hypot(x - p[p.length - 2], y - p[p.length - 1]) > 0.0015) p.push(x, y);
+    });
+    if (!cur.raf) cur.raf = requestAnimationFrame(() => { if (cur) cur.raf = 0; redrawInk(layer); });
+  });
+  const end = e => {
+    if (!cur || e.pointerId !== cur.id) return;
+    const ink = viewerState?.ink;
+    if (ink) {
+      if (cur.erase) { if (cur.erase.removed.length) ink.undo.push(cur.erase); }
+      else ink.undo.push({ key: cur.key, added: cur.s });
+      if (!cur.erase || cur.erase.removed.length) scheduleInkSave();
+    }
+    cur = null;
+    redrawInk(layer);
+  };
+  layer.addEventListener('pointerup', end);
+  layer.addEventListener('pointercancel', end);
+}
+function segDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l = dx * dx + dy * dy;
+  const t = l ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l)) : 0;
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+// 消しゴムは触れた線を 1 本まるごと消す
+function eraseAt(layer, [x, y], rec) {
+  const list = viewerState.ink.pages[rec.key] || [];
+  let hit = false;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const s = list[i], p = s.p, r = ERASER_R + s.w / 2;
+    let near = p.length === 2 && Math.hypot(x - p[0], y - p[1]) <= r;
+    for (let j = 0; !near && j < p.length - 2; j += 2) near = segDist(x, y, p[j], p[j + 1], p[j + 2], p[j + 3]) <= r;
+    if (near) { rec.removed.push({ s, i }); list.splice(i, 1); hit = true; }
+  }
+  if (hit) redrawInk(layer);
+}
+function undoInk() {
+  const ink = viewerState?.ink;
+  const u = ink?.undo.pop();
+  if (!u) { toast('元に戻す操作はありません'); return; }
+  const list = ink.pages[u.key] || (ink.pages[u.key] = []);
+  if (u.added) list.splice(list.indexOf(u.added), 1);
+  else [...u.removed].reverse().forEach(({ s, i }) => list.splice(Math.min(i, list.length), 0, s));
+  const layer = ink.layers.get(u.key);
+  if (layer) redrawInk(layer);
+  scheduleInkSave();
+}
+
+function scheduleInkSave() {
+  const ink = viewerState?.ink;
+  clearTimeout(ink.saveTimer);
+  ink.saveTimer = setTimeout(() => saveInk(viewerState?.p, ink), 1200);
+}
+async function saveInk(p, ink) {
+  if (!p || !ink) return;
+  clearTimeout(ink.saveTimer); ink.saveTimer = null;
+  const pages = {};
+  Object.entries(ink.pages).forEach(([k, v]) => { if (v.length) pages[k] = v; });
+  const blob = new Blob([JSON.stringify({ v: 1, pages })], { type: INK_MIME });
+  let meta = S.pdfs.find(x => x.id === inkId(p));
+  if (!meta) {
+    meta = { id: inkId(p), songId: p.songId, songTitle: p.songTitle, driveId: '' };
+    S.pdfs.push(meta);
+  }
+  Object.assign(meta, { name: `${p.name}.ink.json`, size: blob.size, mime: INK_MIME, updatedAt: Date.now(), hasBlob: true });
+  await idb.put('pdfBlobs', blob, meta.id);
+  await idb.put('pdfs', meta);
+  await queueUpload(meta.id);
+  changed();
+}
+
+function syncInkMode() {
+  const ink = viewerState?.ink;
+  const on = !!ink?.on;
+  $('#viewer').classList.toggle('inking', on);
+  $('#viewer').classList.toggle('ink-finger', on && !!ink?.finger);
+  $('#inkBar').hidden = !on;
+  $('#viewerInk').textContent = on ? '完了' : '✎ 書く';
+  if (!ink) return;
+  document.querySelectorAll('#inkBar [data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === ink.tool));
+  $('#inkFinger').classList.toggle('on', ink.finger);
 }
 
 // ============================================================
@@ -1473,9 +1698,14 @@ document.addEventListener('click', async e => {
     }
     case 'close-viewer': closeViewer(); break;
     case 'zoom': if (viewerState?.text) {
-      viewerState.zoom = Math.min(2.5, Math.max(0.75, viewerState.zoom + Number(el.dataset.z) * 0.125));
-      $('#viewerPages .text-view').style.fontSize = `${16 * viewerState.zoom}px`;
+      viewerState.zoom = Math.min(3, Math.max(0.4, viewerState.zoom * (Number(el.dataset.z) > 0 ? 1.15 : 1 / 1.15)));
+      $('#viewerPages .text-view').style.fontSize = `${viewerState.fit * viewerState.zoom}px`;
+      viewerState.ink?.layers.forEach(sizeInkLayer);
     } else if (viewerState) { viewerState.zoom = Math.min(3, Math.max(0.5, viewerState.zoom + Number(el.dataset.z) * 0.25)); renderPdfPages(); } break;
+    case 'ink-toggle': if (viewerState?.ink) { viewerState.ink.on = !viewerState.ink.on; syncInkMode(); } break;
+    case 'ink-tool': if (viewerState?.ink) { viewerState.ink.tool = el.dataset.tool; inkPrefs.tool = el.dataset.tool; saveInkPrefs(); syncInkMode(); } break;
+    case 'ink-undo': undoInk(); break;
+    case 'ink-finger': if (viewerState?.ink) { viewerState.ink.finger = !viewerState.ink.finger; inkPrefs.finger = viewerState.ink.finger; saveInkPrefs(); syncInkMode(); } break;
     case 'share-pdf': {
       if (!viewerState) break;
       const f = new File([viewerState.blob], viewerState.p.name, { type: viewerState.p.mime || 'application/pdf' });
