@@ -1371,11 +1371,15 @@ async function loadInk(p) {
 function attachInk(host, key) {
   const ink = viewerState?.ink;
   if (!ink) return;
-  host.querySelector(':scope > .ink-layer')?.remove();
+  host.querySelectorAll(':scope > .ink-layer, :scope > .ink-live').forEach(x => x.remove());
+  // 書き終えた線の層と、いま書いている線だけを描く層に分ける。書いている間は全体を描き直さないので、ペンに遅れずについてくる
   const layer = document.createElement('canvas');
   layer.className = 'ink-layer';
   layer.dataset.key = key;
-  host.appendChild(layer);
+  const live = document.createElement('canvas');
+  live.className = 'ink-live';
+  layer.live = live;
+  host.append(layer, live);
   ink.layers.set(key, layer);
   sizeInkLayer(layer);
   bindInkLayer(layer);
@@ -1384,8 +1388,10 @@ function attachInk(host, key) {
 function sizeInkLayer(layer) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const w = layer.parentElement.clientWidth, h = layer.parentElement.clientHeight;
-  layer.width = Math.round(w * dpr); layer.height = Math.round(h * dpr);
-  layer.style.width = `${w}px`; layer.style.height = `${h}px`;
+  [layer, layer.live].forEach(c => {
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+    c.style.width = `${w}px`; c.style.height = `${h}px`;
+  });
   redrawInk(layer);
 }
 function redrawInk(layer) {
@@ -1396,12 +1402,12 @@ function redrawInk(layer) {
   ctx.clearRect(0, 0, layer.width, layer.height);
   (ink.pages[layer.dataset.key] || []).forEach(s => drawStroke(ctx, s, W));
 }
-function drawStroke(ctx, s, W) {
+function drawStroke(ctx, s, W, alpha = s.m ? 0.4 : 1) {
   const p = s.p;
   ctx.save();
   ctx.strokeStyle = s.c; ctx.fillStyle = s.c;
   ctx.lineWidth = s.w * W; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-  ctx.globalAlpha = s.m ? 0.4 : 1;
+  ctx.globalAlpha = alpha;
   if (p.length === 2) {
     ctx.beginPath(); ctx.arc(p[0] * W, p[1] * W, (s.w * W) / 2, 0, Math.PI * 2); ctx.fill();
   } else {
@@ -1415,13 +1421,27 @@ function drawStroke(ctx, s, W) {
   }
   ctx.restore();
 }
+// 書いている線の、まだ描いていない部分だけを足す（点と点の中間を結ぶ曲線で、書き終えたときの線と同じ形になる）
+// 最後の中間点からペン先までの短い部分は、書き終えたときに足される
+function drawLiveTail(cur) {
+  const live = cur.layer.live, ctx = cur.ctx, W = live.width, p = cur.s.p, n = p.length / 2;
+  ctx.strokeStyle = cur.s.c; ctx.lineWidth = cur.s.w * W; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  for (let i = Math.max(1, cur.drawn); i < n - 1; i++) {
+    const [ax, ay] = i === 1 ? [p[0], p[1]] : [(p[2 * i - 2] + p[2 * i]) / 2, (p[2 * i - 1] + p[2 * i + 1]) / 2];
+    ctx.moveTo(ax * W, ay * W);
+    ctx.quadraticCurveTo(p[2 * i] * W, p[2 * i + 1] * W, ((p[2 * i] + p[2 * i + 2]) / 2) * W, ((p[2 * i + 1] + p[2 * i + 3]) / 2) * W);
+  }
+  ctx.stroke();
+  cur.drawn = Math.max(cur.drawn, n - 1);
+}
 
 // Apple Pencil は常に書く。指は「指で書く」がオンのときだけ書き、オフならスクロールに使う
 const inkAccepts = (ink, e) => e.pointerType === 'pen' || e.pointerType === 'mouse' || (e.pointerType === 'touch' && ink.finger);
 function bindInkLayer(layer) {
-  let cur = null;
+  let cur = null, rect = null;
   const pt = e => {
-    const r = layer.getBoundingClientRect();
+    const r = rect || layer.getBoundingClientRect();
     return [Math.round(((e.clientX - r.left) / r.width) * 1e4) / 1e4, Math.round(((e.clientY - r.top) / r.width) * 1e4) / 1e4];
   };
   // iPad の Safari はペンでもスクロールしてしまうので、ペンのタッチだけスクロールを止める
@@ -1437,6 +1457,7 @@ function bindInkLayer(layer) {
     }
     e.preventDefault();
     try { layer.setPointerCapture(e.pointerId); } catch { /* 取れなくても書ける */ }
+    rect = layer.getBoundingClientRect();
     const key = layer.dataset.key;
     const list = ink.pages[key] || (ink.pages[key] = []);
     if (ink.tool === 'eraser') {
@@ -1446,9 +1467,10 @@ function bindInkLayer(layer) {
       const t = INK_TOOLS[ink.tool];
       const s = { c: t.c, w: t.w, p: pt(e) };
       if (t.m) s.m = 1;
-      list.push(s);
-      cur = { id: e.pointerId, s, key };
-      redrawInk(layer);
+      cur = { id: e.pointerId, s, key, list, layer, drawn: 0, ctx: layer.live.getContext('2d') };
+      // マーカーは線全体を半透明にするため、書いている間は層ごと透かす
+      layer.live.style.opacity = s.m ? 0.4 : 1;
+      drawStroke(cur.ctx, s, layer.live.width, 1);
     }
   });
   layer.addEventListener('pointermove', e => {
@@ -1461,18 +1483,23 @@ function bindInkLayer(layer) {
       const [x, y] = pt(ev), p = cur.s.p;
       if (Math.hypot(x - p[p.length - 2], y - p[p.length - 1]) > 0.0015) p.push(x, y);
     });
-    if (!cur.raf) cur.raf = requestAnimationFrame(() => { if (cur) cur.raf = 0; redrawInk(layer); });
+    drawLiveTail(cur);
   });
   const end = e => {
     if (!cur || e.pointerId !== cur.id) return;
     const ink = viewerState?.ink;
     if (ink) {
       if (cur.erase) { if (cur.erase.removed.length) ink.undo.push(cur.erase); }
-      else ink.undo.push({ key: cur.key, added: cur.s });
+      else {
+        cur.list.push(cur.s);
+        ink.undo.push({ key: cur.key, added: cur.s });
+        // 書き終えた線だけを下の層に足し、書いている層を空にする
+        drawStroke(layer.getContext('2d'), cur.s, layer.width);
+        layer.live.getContext('2d').clearRect(0, 0, layer.live.width, layer.live.height);
+      }
       if (!cur.erase || cur.erase.removed.length) scheduleInkSave();
     }
-    cur = null;
-    redrawInk(layer);
+    cur = null; rect = null;
   };
   layer.addEventListener('pointerup', end);
   layer.addEventListener('pointercancel', end);
