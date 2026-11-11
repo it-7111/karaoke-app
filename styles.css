@@ -191,7 +191,7 @@ main { max-width: 1100px; margin: 0 auto; padding: 12px 16px; }
 .form .sub input { padding: 8px 6px; text-align: center; }
 
 /* PDF ビューア */
-.viewer { position: fixed; inset: 0; z-index: 40; background: #2a2930; display: flex; flex-direction: column; }
+.viewer { position: fixed; inset: 0; overflow: hidden; z-index: 40; background: #2a2930; display: flex; flex-direction: column; }
 .viewer[hidden] { display: none; }
 .viewer-bar {
   display: flex; align-items: center; gap: 8px; color: #fff;
@@ -206,10 +206,12 @@ main { max-width: 1100px; margin: 0 auto; padding: 12px 16px; }
 .viewer-pages .page-wrap > canvas:first-child { display: block; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.4); }
 
 /* 手書き。書いていないときは下の文字選択やスクロールの邪魔をしない */
-.ink-layer, .ink-live { position: absolute; left: 0; top: 0; pointer-events: none; }
-.viewer.inking .ink-layer { pointer-events: auto; }
+.ink-hit { position: absolute; inset: 0; pointer-events: none; }
+.ink-hit canvas { position: absolute; left: 0; top: 0; pointer-events: none; }
+.viewer.inking .ink-hit { pointer-events: auto; touch-action: none; }
+#inkLive { position: absolute; left: 0; pointer-events: none; }
+.ink-meter { position: fixed; left: 8px; bottom: calc(8px + var(--safe-b)); z-index: 60; background: rgba(0,0,0,.75); color: #fff; font-size: 12px; padding: 4px 8px; border-radius: 6px; pointer-events: none; }
 .viewer.inking .viewer-pages { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
-.viewer.ink-finger .ink-layer { touch-action: none; }
 .ink-bar { display: flex; gap: 6px; align-items: center; overflow-x: auto; padding: 6px 12px; background: #1b1a20; border-top: 1px solid #333; }
 .ink-bar[hidden] { display: none; }
 .ink-bar button { flex: none; border: 2px solid transparent; background: #3a3842; color: #fff; border-radius: 8px; padding: 5px 10px; font-size: 14px; }
